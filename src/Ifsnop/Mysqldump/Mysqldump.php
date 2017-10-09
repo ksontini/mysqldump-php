@@ -16,8 +16,10 @@
 namespace Ifsnop\Mysqldump;
 
 use Exception;
+use mysqli;
 use PDO;
 use PDOException;
+use Symfony\Component\Console\Helper\ProgressBar;
 
 /**
  * Mysqldump Class Doc Comment
@@ -97,14 +99,15 @@ class Mysqldump
     private $dsnArray = array();
 
     /**
-     * Constructor of Mysqldump. Note that in the case of an SQLite database
+     *  Constructor of Mysqldump. Note that in the case of an SQLite database
      * connection, the filename must be in the $db parameter.
-     *
-     * @param string $dsn        PDO DSN connection string
-     * @param string $user       SQL account username
-     * @param string $pass       SQL account password
-     * @param array  $dumpSettings SQL database settings
-     * @param array  $pdoSettings  PDO configured attributes
+     * Mysqldump constructor.
+     * @param string $dsn
+     * @param string $user
+     * @param string $pass
+     * @param array $dumpSettings
+     * @param array $pdoSettings
+     * @throws Exception
      */
     public function __construct(
         $dsn = '',
@@ -114,7 +117,7 @@ class Mysqldump
         $pdoSettings = array()
     ) {
         $dumpSettingsDefault = array(
-            'include-tables' => array(),
+            'include-tables' => array('reservation'),
             'exclude-tables' => array(),
             'compress' => Mysqldump::NONE,
             'init_commands' => array(),
@@ -124,7 +127,7 @@ class Mysqldump
             'add-drop-table' => false,
             'add-drop-trigger' => true,
             'add-locks' => true,
-            'complete-insert' => false,
+            'complete-insert' => true,
             'databases' => false,
             'default-character-set' => Mysqldump::UTF8,
             'disable-keys' => true,
@@ -133,7 +136,7 @@ class Mysqldump
             'hex-blob' => true, /* faster than escaped content */
             'net_buffer_length' => self::MAXLINESIZE,
             'no-autocommit' => true,
-            'no-create-info' => false,
+            'no-create-info' => true,
             'lock-tables' => true,
             'routines' => false,
             'single-transaction' => true,
@@ -263,8 +266,7 @@ class Mysqldump
 
     /**
      * Connect with PDO
-     *
-     * @return null
+     * @throws Exception
      */
     private function connect()
     {
@@ -310,9 +312,8 @@ class Mysqldump
 
     /**
      * Main call
-     *
      * @param string $filename  Name of file to write sql dump to
-     * @return null
+     * @throws Exception
      */
     public function start($filename = '')
     {
@@ -1017,6 +1018,104 @@ class Mysqldump
         }
 
         return $colStmt;
+    }
+}
+
+/**
+ * @package Ifsnop\Mysqldump
+ * ClassName: PHP MySQL Importer v2.0.1
+ * PHP class for importing big SQL files into a MySql server.
+ * Author: David Castillo - davcs86@gmail.com
+ * Hire me on: https://www.freelancer.com/u/DrAKkareS.html
+ * Blog: http://blog.d-castillo.info/
+ */
+class MySQLImporter {
+    public $hadErrors = false;
+    public $errors = array();
+    private $conn = null;
+    private $output = null;
+
+    public function __construct($host, $user, $pass, $port = false,$output=null) {
+        if ($port==false){
+            $port = ini_get("mysqli.default_port");
+        }
+        $this->hadErrors = false;
+        $this->output = $output;
+        $this->errors = array();
+        print("$host, $user, $pass, $port ");
+        $this->conn = new mysqli($host, $user, $pass, "", $port);
+        if ($this->conn->connect_error) {
+            $this->addError("Connect Error (".$this->conn->connect_errno.") ".$this->conn->connect_error);
+        }
+    }
+
+    private function addError($errorStr){
+        $this->hadErrors = true;
+        $this->errors[] = $errorStr;
+    }
+
+    public function doImport($sqlFile, $database = "", $createDB = false, $dropDB = false) {
+        if ($this->hadErrors == false) {
+            //Drop database if it's required
+            if ($dropDB && $database!=""){
+                if (!$this->conn->query("DROP DATABASE IF EXISTS ".$database)){
+                    $this->addError("Query error (".$this->conn->errno.") ".$this->conn->error);
+                }
+            }
+            //Create the database if it's required
+            if ($createDB && $database!=""){
+                if (!$this->conn->query("CREATE DATABASE IF NOT EXISTS ".$database)){
+                    $this->addError("Query error (".$this->conn->errno.") ".$this->conn->error);
+                }
+            }
+            //Select the database if it's required
+            if ($database!=""){
+                if (!$this->conn->select_db($database)){
+                    $this->addError("Query error (".$this->conn->errno.") ".$this->conn->error);
+                }
+            }
+            if (is_file($sqlFile) && is_readable($sqlFile)){
+                try {
+                    $f = fopen($sqlFile,"r");
+                    $sqlFile = fread($f, filesize($sqlFile));
+                    // processing and parsing the content
+                    $sqlFile = str_replace("\r","\n",$sqlFile);
+                    $lines = preg_split("/\n/", $sqlFile);
+                    $queryStr = "";
+                    $progress = new ProgressBar($this->output, count($lines));
+                    $progress->start();
+                    foreach($lines as $line){
+                        $lt_line = ltrim($line);
+                        $t_queryStr = trim($queryStr);
+                        if (1==preg_match("/^#|^\-\-/",$lt_line) && $t_queryStr == ""){
+                            continue; // skip one-line comments
+                        }
+                        $queryStr .= $line."\n"; // append the line to the current query
+                        $t_line = rtrim($lt_line);
+                        if (1!==preg_match("/;$/",$t_line)){
+                            continue; // skip incomplete statement
+                        }
+                        if (substr_count($queryStr,"/*")!=substr_count($queryStr,"*/")){
+                            continue; // skip incomplete statement (hack for multiline comments)
+                        }
+                        $queryStr = trim($queryStr);
+                        if (!$this->conn->query($queryStr)){
+                            $this->addError("Query error (".$this->conn->errno.") ".$this->conn->error."\r\n\r\nOriginal Query:\r\n\r\n".$queryStr);
+                            break;
+                        }
+                        $queryStr="";
+                        $progress->advance();
+                    }
+                    $progress->finish();
+                    $this->output->writeln("\n");
+
+                } catch(Exception $error) {
+                    $this->addError("File error: (".$error->getCode().") ".$error->getMessage());
+                }
+            } else {
+                $this->addError("File error: '".$sqlFile."' is not a readable file.");
+            }
+        }
     }
 }
 
